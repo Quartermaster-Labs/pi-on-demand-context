@@ -1,10 +1,35 @@
 import { describe, it, expect } from "vitest";
-import { resolve, dirname } from "node:path";
-import { resolveCdDir, dirForToolEvent, pickNewFiles } from "./index.ts";
+import { resolve, dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { resolveCdDir, dirForToolEvent, pickNewFiles, discoverContextFiles } from "./index.ts";
 
 const HOME = "/home/radu";
 const CWD = "/proj/app";
 const BASE = "/proj/app";
+
+describe("discoverContextFiles", () => {
+  it("returns files deepest-first across multiple depths", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pdoc-"));
+    try {
+      const mid = join(root, "mid");
+      const deep = join(mid, "deep");
+      await mkdir(deep, { recursive: true });
+      await writeFile(join(root, "CLAUDE.md"), "top\n");
+      await writeFile(join(mid, "CLAUDE.md"), "mid\n");
+      await writeFile(join(deep, "CLAUDE.md"), "deep\n");
+      const files = await discoverContextFiles(deep, root);
+      expect(files.map((f) => f.path)).toEqual([
+        join(deep, "CLAUDE.md"),
+        join(mid, "CLAUDE.md"),
+        join(root, "CLAUDE.md"),
+      ]);
+      expect(files.map((f) => f.content)).toEqual(["deep\n", "mid\n", "top\n"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("resolveCdDir", () => {
   it("returns null for non-cd commands", () => {

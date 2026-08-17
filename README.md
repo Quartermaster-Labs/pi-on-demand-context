@@ -14,6 +14,8 @@ directory — by `cd`-ing into it, or by touching a file there with
 - Context is injected **once, durably** the moment a dir is touched (via
   `sendMessage` with `deliverAs: "steer"`), so a dir's `CLAUDE.md` is in view
   before the model acts there — same agent loop, no per-call re-send
+- In the TUI the injection shows as one compact line — `loaded <path>[/path]` —
+  not the file contents (expand tool output to see the full text)
 - Files pi already loaded (or a shared parent) are **not** re-sent
 - Multiple directories can be visited — context accumulates across the session
 

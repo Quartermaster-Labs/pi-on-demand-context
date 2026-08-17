@@ -43,6 +43,10 @@ Everything lives in `index.ts`. The extension is the default-exported
   persisted to session history and LLM-visible (custom messages serialize to a
   `role: "user"` message — see `messages.js`), so it is **never re-sent**. This
   mirrors how Claude Code injects nested context: once, durably, at touch time.
+  The message's `details` carries `{ files: [paths] }` and a
+  `registerMessageRenderer("on-demand-context")` shows the TUI only a compact
+  `loaded <paths>` line (full text when tool output is expanded) — without it,
+  pi's default renderer dumps the whole markdown block into the transcript.
 - **`before_agent_start`** — seed-only: records pi's own startup context files
   (`systemPromptOptions.contextFiles`) into `piLoadedPaths` so we never
   double-inject what pi already put in the system prompt. Returns nothing.
@@ -77,6 +81,12 @@ the transient hook cannot.
   `&& pwd` / `; pwd` → trust the pwd output (handles spaces, `cd -`, `~`, `$VAR`),
   else `resolve(currentDir, target)`. Keep it pure — tests in `index.test.ts`
   depend on it.
+- **`@earendil-works/pi-tui` import in `index.ts` needs NO npm dependency** —
+  pi's extension loader aliases it (and pi-coding-agent, pi-ai, typebox) to the
+  host's own copy for every extension, in all runtime modes (Node dist, bun
+  binary, TS source — see `loader.js` `getAliases`/`VIRTUAL_MODULES`). Don't
+  add it to package.json. Vitest has no such loader: `vitest.config.ts`
+  aliases it to `test/pi-tui-stub.ts` so `index.ts` resolves under test.
 - **Windows/msys path handling**: `fromBashPath` converts `/c/Users/...` →
   `C:\Users\...`; `pathKey` normalizes for dedup comparison. Touch carefully —
   this repo runs on win32 where bash and node disagree on path format.

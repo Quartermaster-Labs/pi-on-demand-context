@@ -1,6 +1,6 @@
 {
   "name": "@quartermaster-labs/pi-on-demand-context",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Pi extension. Auto-loads CLAUDE.md / AGENTS.md context when the model works in a dir — via bash `cd` or any file tool (read/edit/write/grep/ls/find). Injected once, durably; deduped against pi's own loader.",
   "keywords": [
     "pi-package",

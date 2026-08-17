@@ -4,7 +4,9 @@
  * Automatically loads CLAUDE.md / AGENTS.md context files when the model works
  * in a directory — by `cd`-ing into it, or by touching a file there with any
  * file tool (read/edit/write/grep/ls/find). No special tool needed; context is
- * injected once, durably, the moment a dir is touched.
+ * injected once, durably, the moment a dir is touched. The LLM receives the
+ * full file contents; the TUI shows only a compact "loaded <path>" line
+ * (a custom message renderer — the full text appears when expanded).
  *
  * Complements pi's own startup loader (deduped against it) — no
  * `--no-context-files` flag required.
@@ -14,6 +16,7 @@
  */
 
 import type { ExtensionAPI, BuildSystemPromptOptions } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { readFile } from "node:fs/promises";
 import { join, dirname, isAbsolute, resolve } from "node:path";
 
@@ -43,6 +46,11 @@ interface ContextFile {
 
 interface DirState {
   files: ContextFile[];
+}
+
+/** `details` payload on the injected custom message — consumed by the TUI renderer. */
+interface ContextDetails {
+  files: string[];
 }
 
 interface State {
@@ -124,7 +132,10 @@ export function dirForToolEvent(
   return isFile ? dirname(abs) : abs;
 }
 
-async function discoverContextFiles(rootDir: string, ceiling: string): Promise<ContextFile[]> {
+export async function discoverContextFiles(
+  rootDir: string,
+  ceiling: string,
+): Promise<ContextFile[]> {
   const found = new Map<string, string>();
   rootDir = fromBashPath(rootDir);
   ceiling = fromBashPath(ceiling);
@@ -155,8 +166,9 @@ async function discoverContextFiles(rootDir: string, ceiling: string): Promise<C
     dir = parent;
   }
 
-  // Deepest first, so parent files get appended later (shallow override)
-  return [...found.entries()].reverse().map(([path, content]) => ({ path, content }));
+  // Walk order is already deepest-first (start dir first, then parents) —
+  // matches the contract buildContextBlock/pickNewFiles expect (files[0] deepest)
+  return [...found.entries()].map(([path, content]) => ({ path, content }));
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +233,30 @@ export default function onDemandContext(pi: ExtensionAPI) {
   state = initState();
 
   // ---------------------------------------------------------------------------
+  // TUI rendering — the injected custom message shows as one compact line
+  // ("loaded <path>[", path]") instead of dumping the full file contents.
+  // The LLM still receives the full content; expanding tool output (the same
+  // global toggle) shows the full text.
+  // ---------------------------------------------------------------------------
+
+  pi.registerMessageRenderer<ContextDetails>("on-demand-context", (message, options, theme) => {
+    if (options.expanded) {
+      const text =
+        typeof message.content === "string"
+          ? message.content
+          : message.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+      return new Text(theme.fg("muted", text), options.outputPad, 0);
+    }
+    const files = message.details?.files;
+    const paths = files && files.length > 0 ? files.join(", ") : "context files";
+    return new Text(
+      theme.fg("customMessageLabel", "loaded ") + theme.fg("muted", paths),
+      options.outputPad,
+      0,
+    );
+  });
+
+  // ---------------------------------------------------------------------------
   // tool_result — resolve the directory a tool touched (bash `cd`, or a
   // read/edit/write/grep/ls/find path) and inject its context files once.
   // ---------------------------------------------------------------------------
@@ -263,6 +299,7 @@ export default function onDemandContext(pi: ExtensionAPI) {
     // Discover asynchronously, then inject any new files ONCE as a durable,
     // LLM-visible message. deliverAs:"steer" lands it in the running loop (before
     // the model's next tool call); when idle pi falls through to a durable push.
+    // details.files lets the TUI renderer show a compact "loaded <paths>" line.
     state.inFlight.add(dir);
     discoverContextFiles(dir, state.launchDir)
       .then((files) => {
@@ -274,7 +311,8 @@ export default function onDemandContext(pi: ExtensionAPI) {
           {
             customType: "on-demand-context",
             content: [{ type: "text", text: buildContextBlock(fresh) }],
-            display: `Loaded context (${fresh.length} file${fresh.length > 1 ? "s" : ""})`,
+            display: true,
+            details: { files: fresh.map((f) => f.path) },
           },
           { deliverAs: "steer" },
         );
