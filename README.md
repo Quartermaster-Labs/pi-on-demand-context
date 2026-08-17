@@ -1,35 +1,62 @@
-# On-Demand Context Extension
+# pi-on-demand-context
 
-Loads `CLAUDE.md` and `AGENTS.md` context files when the model works in a
+A [pi](https://github.com/earendil-works/pi-coding-agent) extension that
+auto-loads `CLAUDE.md` / `AGENTS.md` context files when the model works in a
 directory — by `cd`-ing into it, or by touching a file there with
-`read`/`edit`/`write`/`grep`/`ls`/`find`.
+`read` / `edit` / `write` / `grep` / `ls` / `find`. No special tools, no flags.
+
+Pi loads context files for the **launch directory** (and its parents) at
+startup. Deeper directories stay invisible: `cd services/api` mid-session and
+its `CLAUDE.md` never enters the conversation. This extension closes that gap —
+the moment the model touches a new directory, that directory's context files
+are injected into the conversation, once, durably, before the model's next
+response.
 
 ## How it works
 
-- pi auto-loads context files for the launch dir + parents at startup (unchanged)
-- Model `cd some/dir`, or reads/edits/greps a file anywhere — no special tool needed
-- Extension resolves the target directory and injects context from it (+ parents)
-- A `read`/`edit`/`write` loads the **file's** directory; `grep`/`ls`/`find` load
-  the searched directory; these do **not** move the bash working dir
-- Context is injected **once, durably** the moment a dir is touched (via
-  `sendMessage` with `deliverAs: "steer"`), so a dir's `CLAUDE.md` is in view
-  before the model acts there — same agent loop, no per-call re-send
-- In the TUI the injection shows as one compact line — `loaded <path>[/path]` —
-  not the file contents (expand tool output to see the full text)
-- Files pi already loaded (or a shared parent) are **not** re-sent
-- Multiple directories can be visited — context accumulates across the session
+- **Triggers** — after every tool result, the extension resolves which
+  directory the tool touched:
+  - `bash` — a `cd` moves the tracked working dir. A plain `cd <path>` is
+    resolved against the last known dir; `cd ... && pwd` (or `; pwd`) trusts
+    `pwd`'s output, which handles `cd -`, `~`, `$VAR`, `$(...)`, and paths
+    with spaces.
+  - `read` / `edit` / `write` — the touched **file's** directory.
+  - `grep` / `ls` / `find` — the searched directory.
+
+  File tools do **not** move the bash working dir (bash subshells own that);
+  they just load context.
+- **Discovery** — walks from the touched dir **upwards**, collecting
+  `CLAUDE.md` / `AGENTS.md` (64 KB cap per file), stopping at pi's launch
+  dir so it never scans above the project. Files are ordered deepest-first —
+  deeper files override broader parents where they conflict.
+- **Injection** — not-yet-seen files are sent as one **durable** message
+  (`sendMessage`, `deliverAs: "steer"`), awaited inside the `tool_result` hook
+  so it lands right after the tool result — before the model's next thinking
+  block. Being durable session history, it is never re-sent: no per-call token
+  tax, and revisiting a dir costs nothing.
+- **TUI** — the injection renders as a single compact line,
+  `loaded <path>, <path>`; expanding tool output shows the full text.
+- **Dedup** — files pi already loaded at startup
+  (`systemPromptOptions.contextFiles`) and files injected via a shared parent
+  are never re-sent. The extension complements pi's loader instead of
+  replacing it — no `--no-context-files` needed.
 
 ## Install
 
-> Formerly published as `@radu0120/pi-on-demand-context`. Same package, republished under the `@quartermaster-labs` scope.
+> Formerly published as `@radu0120/pi-on-demand-context`. Same package,
+> republished under the `@quartermaster-labs` scope.
+
+```bash
+pi install npm:@quartermaster-labs/pi-on-demand-context
+```
+
+Or manually:
 
 ```bash
 npm install -g @quartermaster-labs/pi-on-demand-context
 ```
 
-## Setup
-
-Register the extension in `~/.pi/agent/settings.json`:
+and register it in `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -37,43 +64,65 @@ Register the extension in `~/.pi/agent/settings.json`:
 }
 ```
 
-Or use the local path:
-
-```json
-{
-  "extensions": ["~/.npm-global/lib/node_modules/@quartermaster-labs/pi-on-demand-context"]
-}
-```
-
-No `--no-context-files` / `noContextFiles` needed — the extension complements
-pi's default loader instead of replacing it, deduping against what pi already
-injected via `systemPromptOptions.contextFiles`.
-
-After modifying `index.ts`, run `/reload`.
+Then restart pi, or run `/reload` in a running session.
 
 ## Usage
 
 ### For the model
 
 ```bash
-cd some/dir          # plain cd works — new dir is resolved from the path
-cd some/dir && pwd   # recommended — pwd gives the exact dir, no guessing
+cd some/dir          # plain cd works — resolved against the last known dir
+cd some/dir && pwd   # recommended — pwd reports the exact dir, no guessing
 ```
 
-A plain `cd <path>` is enough for ordinary relative/absolute paths; the new
-directory is resolved against the last known one. Append `&& pwd` when the path
-can't be computed from the string alone — `cd -`, `cd ~user`, `cd $VAR`, or
-`cd $(...)` — so `pwd` reports the real directory. Either way context files are
-injected before the next turn; no special tool needed.
+Append `&& pwd` when the target can't be computed from the string alone —
+`cd -`, `cd ~user`, `cd $VAR`, `cd $(...)`. Either way, context is injected
+before the model's next turn.
 
 ### For the user
 
-- `/list-context` — show all loaded context files
-- Context resets on `/new`, `/resume`, `/fork`
+- `/list-context` — show every context file loaded so far (no token cost).
+- Context state resets on `/new`, `/resume`, `/fork`.
 
-## Notes
+## Behavior notes
 
-- Context files are loaded from the target directory **and all parent directories**
-- Files are not re-loaded if you `cd` back to a visited directory
-- Uses `&& pwd` (or `; pwd`) to reliably detect the actual new working directory
-- Works on Windows (WSL/bash) and Unix systems
+- A dir's context includes **that dir and all parents** up to pi's launch dir.
+- `cd`-ing back into a visited dir loads nothing (dedup).
+- Visiting multiple dirs accumulates context; each new dir contributes only
+  its not-yet-seen files.
+- Windows (git-bash / msys) and Unix both work — bash-style `/c/Users/...`
+  paths are normalized for the filesystem.
+
+## Development
+
+```bash
+npm install
+npm test             # vitest — no build step (pi loads index.ts directly)
+```
+
+Local dev loop (no publish needed):
+
+```bash
+pi install /path/to/pi-on-demand-context   # forward slashes on Windows
+# then /reload in a running session
+```
+
+Contributor notes (full details in `CLAUDE.md`):
+
+- `index.ts` is the entire extension. `resolveCdDir`, `dirForToolEvent`,
+  `pickNewFiles`, and `discoverContextFiles` are exported, unit-tested helpers.
+  Keep the deepest-first ordering contract (`files[0]` = deepest).
+- The `@earendil-works/pi-tui` import needs **no** npm dependency — pi's
+  extension loader aliases pi packages to the host's own copy. Vitest has no
+  such loader, so `vitest.config.ts` aliases it to `test/pi-tui-stub.ts`.
+- **Keep the `await` in the `tool_result` handler.** pi drains the steering
+  queue only at iteration boundaries; fire-and-forget discovery would land the
+  context one full assistant turn late.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
