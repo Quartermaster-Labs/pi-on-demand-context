@@ -6,12 +6,14 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
-- **`workingDirOnly` config option** ([#1](https://github.com/Quartermaster-Labs/pi-on-demand-context/issues/1)) —
-  when `true`, context files are only loaded under pi's working (launch)
-  directory. Touching files or `cd`-ing outside the project loads nothing
-  (the tracked working dir still moves), so unrelated `CLAUDE.md` files —
-  e.g. `~/CLAUDE.md` or a package manager's — no longer leak in from stray
-  touches.
+- **`workingDirOnly` config option — on by default**
+  ([#1](https://github.com/Quartermaster-Labs/pi-on-demand-context/issues/1)) —
+  context files are only loaded under pi's working (launch) directory, with
+  no configuration needed. Touching files or `cd`-ing outside the project
+  loads nothing (the tracked working dir still moves), so unrelated
+  `CLAUDE.md` files — e.g. `~/CLAUDE.md` or a package manager's — no longer
+  leak in from stray touches. Set `"workingDirOnly": false` to restore the
+  old walk-up-to-filesystem-root behavior.
 - **`hideContents` config option** ([#1](https://github.com/Quartermaster-Labs/pi-on-demand-context/issues/1)) —
   when `true`, the TUI never shows the injected file contents, even when tool
   output is expanded; the `loaded <paths>` line stays compact. The LLM still
@@ -20,6 +22,9 @@ All notable changes to this project are documented in this file.
   `~/.pi/agent/on-demand-context.json` (global) and
   `<project>/.pi/on-demand-context.json` (per-project, honored only for
   trusted projects). Re-read at every session start, including `/reload`.
+- `/odc-working-dir-only on|off` and `/odc-hide-contents on|off` — toggle
+  the options at runtime without editing any file; they apply immediately and
+  persist to the global config.
 - `/list-context` now shows the active config next to the loaded files.
 
 ## [0.2.0] — 2026-08-17

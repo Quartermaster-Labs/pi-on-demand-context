@@ -13,10 +13,12 @@
  * Complements pi's own startup loader (deduped against it) — no
  * `--no-context-files` flag required.
  *
- * Optional config (project overrides global; project file honored only for
- * trusted projects):
+ * Config (optional — workingDirOnly defaults ON, hideContents OFF; project
+ * overrides global; project file honored only for trusted projects):
  *   ~/.pi/agent/on-demand-context.json   <project>/.pi/on-demand-context.json
- *   { "workingDirOnly": true, "hideContents": true }
+ *   { "workingDirOnly": false, "hideContents": true }
+ * Runtime toggles (apply now + persist to the global file):
+ *   /odc-working-dir-only on|off, /odc-hide-contents on|off
  *
  * Install to: ~/.pi/agent/extensions/on-demand-context/
  * Reload with: /reload
@@ -24,9 +26,9 @@
 
 import type { ExtensionAPI, BuildSystemPromptOptions } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Text, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { readFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname, isAbsolute, resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -77,8 +79,10 @@ interface State {
 
 interface Config {
   /** Only load context files under pi's launch (working) dir — issue #1. */
+  /** Default: true (the out-of-tree leak is the bug, not the feature). */
   workingDirOnly: boolean;
   /** TUI never shows injected contents, even expanded — issue #1. */
+  /** Default: false. */
   hideContents: boolean;
 }
 
@@ -142,17 +146,41 @@ export function isUnderOrEqual(child: string, parent: string): boolean {
 }
 
 // Merge global + project config (project wins) into a validated Config.
-// Unknown keys are dropped; non-boolean truthies don't count. Pure — exported
-// for tests.
+// Defaults (zero-config, issue #1): workingDirOnly ON, hideContents OFF.
+// Unknown keys are dropped; non-boolean values are ignored (default applies).
+// Pure — exported for tests.
 export function mergeConfig(
   global: Record<string, unknown>,
   project: Record<string, unknown>,
 ): Config {
   const m = { ...global, ...project };
   return {
-    workingDirOnly: m.workingDirOnly === true,
-    hideContents: m.hideContents === true,
+    workingDirOnly: boolOr(m.workingDirOnly, true),
+    hideContents: boolOr(m.hideContents, false),
   };
+}
+
+// Coerce to a strict boolean or fall back to `dflt` (garbage ≠ enabled).
+function boolOr(v: unknown, dflt: boolean): boolean {
+  return typeof v === "boolean" ? v : dflt;
+}
+
+// Persist one option to the GLOBAL config file (merging with existing keys).
+// The /odc-* commands are user-initiated, so writing global config from them
+// is safe even for untrusted projects; per-project files stay file-edited.
+function persistGlobalConfig(
+  key: "workingDirOnly" | "hideContents",
+  value: boolean,
+): string | null {
+  const p = join(getAgentDir(), CONFIG_FILE);
+  try {
+    const cur = readJsonFile(p);
+    cur[key] = value;
+    writeFileSync(p, JSON.stringify(cur, null, 2) + "\n", "utf-8");
+    return null;
+  } catch (err) {
+    return `failed to save ${key} to ${p}: ${err}`;
+  }
 }
 
 function readJsonFile(p: string): Record<string, unknown> {
@@ -249,7 +277,9 @@ export async function discoverContextFiles(
 // ---------------------------------------------------------------------------
 
 let state: State | null = null;
-let config: Config = { workingDirOnly: false, hideContents: false };
+// Pre-session default (global-only load may not have run yet): issue #1's
+// safe behavior is the default — out-of-tree context stays out.
+let config: Config = { workingDirOnly: true, hideContents: false };
 
 function initState(): State {
   return {
@@ -456,6 +486,46 @@ export default function onDemandContext(pi: ExtensionAPI) {
       ctx.ui.notify(lines.join("\n"), "info");
     },
   });
+
+  // ---------------------------------------------------------------------------
+  // /odc-working-dir-only, /odc-hide-contents — runtime toggles (odc- prefix
+  // marks the commands as ours). No arg shows the current value; on/off sets
+  // it for this session AND persists to the global config file, so no hand-
+  // edited JSON is needed.
+  // ---------------------------------------------------------------------------
+
+  const toggleCommand = (
+    name: string,
+    key: "workingDirOnly" | "hideContents",
+  ) => {
+    pi.registerCommand(`odc-${name}`, {
+      description: `${key} (on|off) — sets it now and saves to the global config`,
+      getArgumentCompletions: (prefix: string): AutocompleteItem[] =>
+        ["on", "off"]
+          .filter((v) => v.startsWith(prefix.toLowerCase()))
+          .map((v) => ({ value: v, label: v })),
+      handler: async (args: string, ctx) => {
+        const arg = (args ?? "").trim().toLowerCase();
+        if (arg === "") {
+          ctx.ui.notify(`${key}: ${config[key] ? "on" : "off"}`, "info");
+          return;
+        }
+        const value = arg === "on" || arg === "true";
+        if (!value && arg !== "off" && arg !== "false") {
+          ctx.ui.notify(`usage: /odc-${name} on|off`, "info");
+          return;
+        }
+        config[key] = value;
+        const err = persistGlobalConfig(key, value);
+        ctx.ui.notify(
+          err ?? `${key}: ${value ? "on" : "off"} (saved to global config)`,
+          "info",
+        );
+      },
+    });
+  };
+  toggleCommand("working-dir-only", "workingDirOnly");
+  toggleCommand("hide-contents", "hideContents");
 
   // ---------------------------------------------------------------------------
   // Session reset

@@ -160,8 +160,15 @@ describe("isUnderOrEqual", () => {
 });
 
 describe("mergeConfig", () => {
-  it("defaults to off when both scopes are empty", () => {
-    expect(mergeConfig({}, {})).toEqual({ workingDirOnly: false, hideContents: false });
+  it("defaults to workingDirOnly on / hideContents off when both scopes are empty", () => {
+    expect(mergeConfig({}, {})).toEqual({ workingDirOnly: true, hideContents: false });
+  });
+
+  it("explicit false opts out of the workingDirOnly default", () => {
+    expect(mergeConfig({ workingDirOnly: false }, {})).toEqual({
+      workingDirOnly: false,
+      hideContents: false,
+    });
   });
 
   it("project overrides global, per key", () => {
@@ -172,16 +179,16 @@ describe("mergeConfig", () => {
     expect(got).toEqual({ workingDirOnly: false, hideContents: true });
   });
 
-  it("non-boolean truthies don't enable an option", () => {
-    expect(mergeConfig({ workingDirOnly: "yes" }, {})).toEqual({
-      workingDirOnly: false,
+  it("non-boolean values are ignored (defaults apply)", () => {
+    expect(mergeConfig({ workingDirOnly: "yes", hideContents: 1 }, {})).toEqual({
+      workingDirOnly: true, // garbage ≠ explicit false → default on
       hideContents: false,
     });
   });
 
   it("ignores unrelated keys", () => {
     expect(mergeConfig({ somethingElse: 1 }, { somethingElse: 2 })).toEqual({
-      workingDirOnly: false,
+      workingDirOnly: true,
       hideContents: false,
     });
   });
@@ -220,12 +227,12 @@ describe("loadConfig", () => {
     const cwd = await mkdtemp(join(tmpdir(), "pdoc-cwd-"));
     process.env.PI_TEST_AGENT_DIR = agent;
     try {
-      expect(loadConfig(cwd, true)).toEqual({ workingDirOnly: false, hideContents: false });
+      expect(loadConfig(cwd, true)).toEqual({ workingDirOnly: true, hideContents: false });
       await writeFile(join(agent, "on-demand-context.json"), "{ not json");
-      expect(loadConfig(cwd, false)).toEqual({ workingDirOnly: false, hideContents: false });
+      expect(loadConfig(cwd, false)).toEqual({ workingDirOnly: true, hideContents: false });
       // A JSON array / scalar is not a config object.
       await writeFile(join(agent, "on-demand-context.json"), "[1,2]");
-      expect(loadConfig(cwd, false)).toEqual({ workingDirOnly: false, hideContents: false });
+      expect(loadConfig(cwd, false)).toEqual({ workingDirOnly: true, hideContents: false });
     } finally {
       delete process.env.PI_TEST_AGENT_DIR;
       await rm(agent, { recursive: true, force: true });

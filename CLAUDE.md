@@ -69,11 +69,14 @@ Everything lives in `index.ts`. The extension is the default-exported
 - **Config** — `loadConfig(cwd, projectTrusted)` merges
   `<agentDir>/on-demand-context.json` (global, `getAgentDir()`) with
   `<cwd>/.pi/on-demand-context.json` (project, `CONFIG_DIR_NAME`) — project
-  wins per key. Options: `workingDirOnly`, `hideContents` (see README).
-  The project file is read only when `ctx.isProjectTrusted()` — an untrusted
-  project must not steer a globally installed extension. At extension load
-  time there is no ctx (no trust decision), so only the global file applies
-  until the first `session_start`.
+  wins per key. Defaults (zero-config, issue #1): `workingDirOnly` **on**,
+  `hideContents` off. The project file is read only when
+  `ctx.isProjectTrusted()` — an untrusted project must not steer a globally
+  installed extension. At extension load time there is no ctx (no trust
+  decision), so only the global file applies until the first `session_start`.
+  `/odc-working-dir-only on|off` and `/odc-hide-contents on|off` mutate the
+  live config and `persistGlobalConfig` writes the global file (commands are
+  user-initiated, so that's safe even in untrusted projects).
 - **`/list-context`** command — user-facing dump of loaded files + active
   config; no token cost.
 
@@ -102,8 +105,9 @@ the transient hook cannot.
   (which dir a file/dir tool touches), `resolveCdDir(...)` below,
   `isUnderOrEqual(child, parent)` (subtree test behind `workingDirOnly` —
   normalizes bash→win + separators, case-insensitive only on win32),
-  `mergeConfig(global, project)` (pure config merge; non-boolean truthies
-  don't enable options), and `loadConfig(cwd, trusted)` (fs-backed).
+  `mergeConfig(global, project)` (pure config merge; non-boolean values are
+  ignored via `boolOr` — defaults: workingDirOnly on, hideContents off), and
+  `loadConfig(cwd, trusted)` (fs-backed).
 - `resolveCdDir(command, output, currentDir, home)` parses a `cd` command:
   bare `cd` → home,
   `&& pwd` / `; pwd` → trust the pwd output (handles spaces, `cd -`, `~`, `$VAR`),

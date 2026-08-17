@@ -37,6 +37,8 @@ response.
 - **TUI** — the injection renders as a single compact line,
   `loaded <path>, <path>`; expanding tool output shows the full text
   (disable with `hideContents` — see Configuration).
+- `/odc-working-dir-only` / `/odc-hide-contents` — toggle the config options
+  at runtime without editing any file (persist to the global config).
 - **Dedup** — files pi already loaded at startup
   (`systemPromptOptions.contextFiles`) and files injected via a shared parent
   are never re-sent. The extension complements pi's loader instead of
@@ -104,16 +106,24 @@ must not steer a globally installed extension).
 }
 ```
 
-- `workingDirOnly` (default `false`) — only load context files under pi's
-  working (launch) directory. When `true`, `cd`-ing or touching files outside
-  the project loads nothing (the tracked working dir still moves), so
-  unrelated `CLAUDE.md` files — e.g. `~/CLAUDE.md` or a package manager's —
-  never leak in. ([#1](https://github.com/Quartermaster-Labs/pi-on-demand-context/issues/1))
+- `workingDirOnly` (default **`true`** — the out-of-tree leak was the bug) —
+  only load context files under pi's working (launch) directory. `cd`-ing or
+  touching files outside the project loads nothing (the tracked working dir
+  still moves), so unrelated `CLAUDE.md` files — e.g. `~/CLAUDE.md` or a
+  package manager's — never leak in. Set `false` to restore the old
+  walk-up-to-filesystem-root behavior. ([#1](https://github.com/Quartermaster-Labs/pi-on-demand-context/issues/1))
 - `hideContents` (default `false`) — the TUI never shows the injected file
   contents, even when tool output is expanded; the `loaded <paths>` line stays
   compact. The LLM still receives the full contents.
 
-Config is re-read at every session start, including `/reload`.
+No config file is needed for the defaults. If you want to change something,
+use the runtime toggles (apply immediately **and** save to the global file):
+
+- `/odc-working-dir-only on|off`
+- `/odc-hide-contents on|off`
+
+Or edit the JSON directly — useful for per-project overrides. Config is
+re-read at every session start, including `/reload`.
 
 ## Behavior notes
 
