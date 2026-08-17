@@ -26,8 +26,9 @@ Reload in a running pi with `/reload`.
 Everything lives in `index.ts`. The extension is the default-exported
 `onDemandContext(pi: ExtensionAPI)` function, wired to pi's event hooks:
 
-- **`tool_result`** — fires after every tool run. Two trigger paths, both
-  ending in a fire-and-forget `discoverContextFiles` for any *new* dir:
+- **`tool_result`** — fires after every tool run (via pi's `afterToolCall`,
+  which **awaits** the handler). Two trigger paths, both ending in an **awaited**
+  `discoverContextFiles` for any *new* dir:
   - `bash` → `resolveCdDir` derives the new working dir; this also **moves**
     `state.currentDir` (the tracked cwd).
   - `read`/`edit`/`write`/`grep`/`ls`/`find` → `dirForToolEvent` derives the
@@ -35,14 +36,22 @@ Everything lives in `index.ts`. The extension is the default-exported
     `currentDir` — bash subshells own that. Relative paths resolve against
     `launchDir` because pi's file tools run from pi's process cwd, not the
     bash-tracked dir.
-  Injection happens right here in the discovery `.then`: `pickNewFiles` selects
-  the not-yet-seen files, `buildContextBlock` renders them, and `pi.sendMessage`
-  injects them **once, durably** with `deliverAs: "steer"`. Steer lands the
-  message in the running agent loop (before the model's next tool call); when the
-  agent is idle, pi falls through to a durable `messages.push`. Either way it's
-  persisted to session history and LLM-visible (custom messages serialize to a
-  `role: "user"` message — see `messages.js`), so it is **never re-sent**. This
-  mirrors how Claude Code injects nested context: once, durably, at touch time.
+  Injection happens right here, **synchronously inside the hook**: `pickNewFiles`
+  selects the not-yet-seen files, `buildContextBlock` renders them, and
+  `pi.sendMessage` injects them **once, durably** with `deliverAs: "steer"`.
+  **Timing matters — keep the `await`**: pi's agent loop only drains the
+  steering queue at iteration boundaries (after tool execution, before the next
+  LLM call). If discovery ran fire-and-forget, the boundary drain would beat the
+  async file reads and the context would land one full assistant turn late
+  (after the model already replied to the tool result). Awaiting inside the hook
+  makes the `loaded <paths>` line appear immediately after the tool result —
+  before the model's next thinking block. Cost: a few ms of local file reads.
+  Steer lands the message in the running agent loop (before the model's next
+  tool call); when the agent is idle, pi falls through to a durable
+  `messages.push`. Either way it's persisted to session history and LLM-visible
+  (custom messages serialize to a `role: "user"` message — see `messages.js`),
+  so it is **never re-sent**. This mirrors how Claude Code injects nested
+  context: once, durably, at touch time.
   The message's `details` carries `{ files: [paths] }` and a
   `registerMessageRenderer("on-demand-context")` shows the TUI only a compact
   `loaded <paths>` line (full text when tool output is expanded) — without it,

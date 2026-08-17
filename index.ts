@@ -4,7 +4,9 @@
  * Automatically loads CLAUDE.md / AGENTS.md context files when the model works
  * in a directory — by `cd`-ing into it, or by touching a file there with any
  * file tool (read/edit/write/grep/ls/find). No special tool needed; context is
- * injected once, durably, the moment a dir is touched. The LLM receives the
+ * injected once, durably, the moment a dir is touched — before the model's
+ * next response (discovery is awaited inside the tool_result hook, so the
+ * steering message is queued before the agent loop's next drain). The LLM receives the
  * full file contents; the TUI shows only a compact "loaded <path>" line
  * (a custom message renderer — the full text appears when expanded).
  *
@@ -261,7 +263,7 @@ export default function onDemandContext(pi: ExtensionAPI) {
   // read/edit/write/grep/ls/find path) and inject its context files once.
   // ---------------------------------------------------------------------------
 
-  pi.on("tool_result", (event) => {
+  pi.on("tool_result", async (event) => {
     if (!state || event.isError) return;
 
     let targetDir: string | null = null;
@@ -296,30 +298,33 @@ export default function onDemandContext(pi: ExtensionAPI) {
     // Already loaded, or a discovery is already running for this dir
     if (state.dirContexts.has(dir) || state.inFlight.has(dir)) return;
 
-    // Discover asynchronously, then inject any new files ONCE as a durable,
-    // LLM-visible message. deliverAs:"steer" lands it in the running loop (before
-    // the model's next tool call); when idle pi falls through to a durable push.
-    // details.files lets the TUI renderer show a compact "loaded <paths>" line.
+    // Discover and inject SYNCHRONOUSLY (this hook is awaited by pi's
+    // afterToolCall). Why: pi's agent loop only drains the steering queue at
+    // iteration boundaries — after tool execution, before the next LLM call.
+    // If discovery ran fire-and-forget, the queue drain would beat the file
+    // reads and the context would land one full assistant turn late (after the
+    // model already thought/replied to the tool result). Awaiting here makes
+    // the "loaded <paths>" line appear right after the tool result — before
+    // the model's next thinking block. Cost: a few ms of local file reads.
     state.inFlight.add(dir);
-    discoverContextFiles(dir, state.launchDir)
-      .then((files) => {
-        if (!state) return;
-        state.dirContexts.set(dir, { files });
-        const fresh = pickNewFiles(state, files);
-        if (fresh.length === 0) return;
-        pi.sendMessage(
-          {
-            customType: "on-demand-context",
-            content: [{ type: "text", text: buildContextBlock(fresh) }],
-            display: true,
-            details: { files: fresh.map((f) => f.path) },
-          },
-          { deliverAs: "steer" },
-        );
-      })
-      .finally(() => {
-        state?.inFlight.delete(dir);
-      });
+    try {
+      const files = await discoverContextFiles(dir, state.launchDir);
+      if (!state) return;
+      state.dirContexts.set(dir, { files });
+      const fresh = pickNewFiles(state, files);
+      if (fresh.length === 0) return;
+      await pi.sendMessage(
+        {
+          customType: "on-demand-context",
+          content: [{ type: "text", text: buildContextBlock(fresh) }],
+          display: true,
+          details: { files: fresh.map((f) => f.path) },
+        },
+        { deliverAs: "steer" },
+      );
+    } finally {
+      state?.inFlight.delete(dir);
+    }
   });
 
   // ---------------------------------------------------------------------------
