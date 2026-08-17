@@ -13,13 +13,20 @@
  * Complements pi's own startup loader (deduped against it) — no
  * `--no-context-files` flag required.
  *
+ * Optional config (project overrides global; project file honored only for
+ * trusted projects):
+ *   ~/.pi/agent/on-demand-context.json   <project>/.pi/on-demand-context.json
+ *   { "workingDirOnly": true, "hideContents": true }
+ *
  * Install to: ~/.pi/agent/extensions/on-demand-context/
  * Reload with: /reload
  */
 
 import type { ExtensionAPI, BuildSystemPromptOptions } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join, dirname, isAbsolute, resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -36,6 +43,10 @@ const DIR_PATH_TOOLS = new Set(["grep", "ls", "find"]);
 // Cap per-file size so one huge/hostile context file can't blow the prompt.
 // ponytail: 64 KB is generous for instructions; raise if you hit it.
 const MAX_FILE_BYTES = 64 * 1024;
+
+// Config filename, in both scopes: <agentDir>/<name> (global) and
+// <cwd>/<CONFIG_DIR_NAME>/<name> (project, trusted projects only).
+const CONFIG_FILE = "on-demand-context.json";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,6 +73,13 @@ interface State {
   injected: Set<string>; // file paths we've already injected durably — dedups shared parents
   inFlight: Set<string>; // dirs whose discovery is running — dedup before dirContexts is set
   launchDir: string; // dir pi was started in — walk-up ceiling
+}
+
+interface Config {
+  /** Only load context files under pi's launch (working) dir — issue #1. */
+  workingDirOnly: boolean;
+  /** TUI never shows injected contents, even expanded — issue #1. */
+  hideContents: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +127,59 @@ export function resolveCdDir(
   }
   // No pwd — compute from current dir + target
   return resolve(currentDir, target);
+}
+
+// True if `child` is `parent` or anywhere inside its subtree. Normalizes
+// bash→win format and separators; case-insensitive on win32 (NTFS is),
+// case-sensitive elsewhere. Pure — exported for tests.
+export function isUnderOrEqual(child: string, parent: string): boolean {
+  const c = fromBashPath(child).replace(/\\/g, "/");
+  const p = fromBashPath(parent).replace(/\\/g, "/");
+  const win = process.platform === "win32";
+  const a = win ? c.toLowerCase() : c;
+  const b = win ? p.toLowerCase() : p;
+  return a === b || a.startsWith(b.endsWith("/") ? b : b + "/");
+}
+
+// Merge global + project config (project wins) into a validated Config.
+// Unknown keys are dropped; non-boolean truthies don't count. Pure — exported
+// for tests.
+export function mergeConfig(
+  global: Record<string, unknown>,
+  project: Record<string, unknown>,
+): Config {
+  const m = { ...global, ...project };
+  return {
+    workingDirOnly: m.workingDirOnly === true,
+    hideContents: m.hideContents === true,
+  };
+}
+
+function readJsonFile(p: string): Record<string, unknown> {
+  try {
+    const v = JSON.parse(readFileSync(p, "utf-8"));
+    return v && typeof v === "object" && !Array.isArray(v)
+      ? (v as Record<string, unknown>)
+      : {};
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code !== "ENOENT") {
+      // Missing config is the normal state; only real parse/read errors log.
+      console.error(`on-demand-context: bad config at ${p}: ${err}`);
+    }
+    return {};
+  }
+}
+
+// Load config: global (<agentDir>/on-demand-context.json) plus project-local
+// (<cwd>/.pi/on-demand-context.json) — project wins. The project file is
+// skipped unless the project is trusted: an untrusted project must not be able
+// to steer a user/global extension's behavior.
+export function loadConfig(cwd: string, projectTrusted: boolean): Config {
+  const g = readJsonFile(join(getAgentDir(), CONFIG_FILE));
+  const p = projectTrusted
+    ? readJsonFile(join(cwd, CONFIG_DIR_NAME, CONFIG_FILE))
+    : {};
+  return mergeConfig(g, p);
 }
 
 // For non-bash file/dir tools, return the directory whose context should load,
@@ -178,6 +249,7 @@ export async function discoverContextFiles(
 // ---------------------------------------------------------------------------
 
 let state: State | null = null;
+let config: Config = { workingDirOnly: false, hideContents: false };
 
 function initState(): State {
   return {
@@ -233,6 +305,10 @@ function buildContextBlock(files: ContextFile[]): string {
 
 export default function onDemandContext(pi: ExtensionAPI) {
   state = initState();
+  // No ctx (and thus no trust decision) exists outside event handlers, so the
+  // project-local file is read only at session_start (which also fires on
+  // /reload). Global config applies immediately.
+  config = loadConfig(process.cwd(), false);
 
   // ---------------------------------------------------------------------------
   // TUI rendering — the injected custom message shows as one compact line
@@ -242,7 +318,9 @@ export default function onDemandContext(pi: ExtensionAPI) {
   // ---------------------------------------------------------------------------
 
   pi.registerMessageRenderer<ContextDetails>("on-demand-context", (message, options, theme) => {
-    if (options.expanded) {
+    // hideContents: expansion is a no-op — the line stays compact. The LLM
+    // still receives the full contents in the durable message.
+    if (options.expanded && !config.hideContents) {
       const text =
         typeof message.content === "string"
           ? message.content
@@ -294,6 +372,14 @@ export default function onDemandContext(pi: ExtensionAPI) {
 
     if (!targetDir) return;
     const dir = fromBashPath(targetDir);
+
+    // workingDirOnly (issue #1): never load context for a dir outside the
+    // launch subtree — that's where ~/CLAUDE.md, homebrew, etc. leak in from
+    // stray touches. Bash `cd` already moved currentDir above; file tools
+    // never did. Discovery below only ever finds files at-or-above the touched
+    // dir, so skipping out-of-subtree dirs is exactly "only files under the
+    // working directory".
+    if (config.workingDirOnly && !isUnderOrEqual(dir, state.launchDir)) return;
 
     // Already loaded, or a discovery is already running for this dir
     if (state.dirContexts.has(dir) || state.inFlight.has(dir)) return;
@@ -347,12 +433,15 @@ export default function onDemandContext(pi: ExtensionAPI) {
   pi.registerCommand("list-context", {
     description: "List all loaded context files and their source directories.",
     handler: async (_args, ctx) => {
+      const cfg =
+        `workingDirOnly ${config.workingDirOnly ? "on" : "off"}, ` +
+        `hideContents ${config.hideContents ? "on" : "off"}`;
       if (!state || state.dirContexts.size === 0) {
-        ctx.ui.notify("No context files loaded yet.", "info");
+        ctx.ui.notify(`No context files loaded yet. (config: ${cfg})`, "info");
         return;
       }
 
-      const lines: string[] = [];
+      const lines: string[] = [`(config: ${cfg})`];
       for (const [dir, dirState] of state.dirContexts) {
         lines.push(`\n${dir}:`);
         if (dirState.files.length === 0) {
@@ -372,7 +461,10 @@ export default function onDemandContext(pi: ExtensionAPI) {
   // Session reset
   // ---------------------------------------------------------------------------
 
-  pi.on("session_start", () => {
+  pi.on("session_start", (_event, ctx) => {
     state = initState();
+    // Fires on startup, /new, /resume, /fork, AND /reload — so config edits
+    // (including the trust-gated project file) apply on the next reload.
+    config = loadConfig(ctx.cwd, ctx.isProjectTrusted());
   });
 }

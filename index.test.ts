@@ -2,7 +2,15 @@ import { describe, it, expect } from "vitest";
 import { resolve, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
-import { resolveCdDir, dirForToolEvent, pickNewFiles, discoverContextFiles } from "./index.ts";
+import {
+  resolveCdDir,
+  dirForToolEvent,
+  pickNewFiles,
+  discoverContextFiles,
+  isUnderOrEqual,
+  mergeConfig,
+  loadConfig,
+} from "./index.ts";
 
 const HOME = "/home/radu";
 const CWD = "/proj/app";
@@ -110,6 +118,119 @@ describe("dirForToolEvent", () => {
   it("dir tools default to baseDir when path omitted", () => {
     expect(dirForToolEvent("ls", {}, BASE)).toBe(BASE);
     expect(dirForToolEvent("grep", { pattern: "x" }, BASE)).toBe(BASE);
+  });
+});
+
+describe("isUnderOrEqual", () => {
+  it("true for the same dir and for descendants", () => {
+    expect(isUnderOrEqual("/proj/app", "/proj/app")).toBe(true);
+    expect(isUnderOrEqual("/proj/app/sub/deep", "/proj/app")).toBe(true);
+  });
+
+  it("false for ancestors and siblings", () => {
+    expect(isUnderOrEqual("/proj", "/proj/app")).toBe(false);
+    expect(isUnderOrEqual("/proj/other", "/proj/app")).toBe(false);
+    // prefix trap: "/proj/appx" starts with "/proj/app" — must still be false
+    expect(isUnderOrEqual("/proj/appx/y", "/proj/app")).toBe(false);
+  });
+
+  it("handles bash-style drive paths", () => {
+    // win32: fromBashPath converts both sides to D:\... ; posix: no-op, and
+    // the containment still holds on the /d/... form.
+    expect(isUnderOrEqual("/d/Projects/LLM Tests/tasktrack", "/d/Projects")).toBe(true);
+    expect(isUnderOrEqual("/d/Projects/other", "/d/Projects/LLM")).toBe(false);
+  });
+
+  it("mixes win-style and bash-style formats on win32", () => {
+    if (process.platform === "win32") {
+      expect(isUnderOrEqual("D:\\Projects\\LLM Tests", "/d/Projects")).toBe(true);
+    } else {
+      // POSIX is case/format sensitive — "D:/..." is a different tree.
+      expect(isUnderOrEqual("D:\\Projects\\LLM Tests", "/d/Projects")).toBe(false);
+    }
+  });
+
+  it("case handling follows the platform", () => {
+    if (process.platform === "win32") {
+      expect(isUnderOrEqual("/D/Projects/X", "/d/projects")).toBe(true);
+    } else {
+      expect(isUnderOrEqual("/D/Projects/X", "/d/projects")).toBe(false);
+    }
+  });
+});
+
+describe("mergeConfig", () => {
+  it("defaults to off when both scopes are empty", () => {
+    expect(mergeConfig({}, {})).toEqual({ workingDirOnly: false, hideContents: false });
+  });
+
+  it("project overrides global, per key", () => {
+    const got = mergeConfig(
+      { workingDirOnly: true, hideContents: true },
+      { workingDirOnly: false },
+    );
+    expect(got).toEqual({ workingDirOnly: false, hideContents: true });
+  });
+
+  it("non-boolean truthies don't enable an option", () => {
+    expect(mergeConfig({ workingDirOnly: "yes" }, {})).toEqual({
+      workingDirOnly: false,
+      hideContents: false,
+    });
+  });
+
+  it("ignores unrelated keys", () => {
+    expect(mergeConfig({ somethingElse: 1 }, { somethingElse: 2 })).toEqual({
+      workingDirOnly: false,
+      hideContents: false,
+    });
+  });
+});
+
+// PI_TEST_AGENT_DIR is honored by test/pi-coding-agent-stub.ts (see
+// vitest.config.ts) so the global config lookup stays hermetic.
+describe("loadConfig", () => {
+  it("merges global + project (project wins); skips project file when untrusted", async () => {
+    const agent = await mkdtemp(join(tmpdir(), "pdoc-agent-"));
+    const cwd = await mkdtemp(join(tmpdir(), "pdoc-cwd-"));
+    process.env.PI_TEST_AGENT_DIR = agent;
+    try {
+      await writeFile(join(agent, "on-demand-context.json"), JSON.stringify({ workingDirOnly: true }));
+      await mkdir(join(cwd, ".pi"), { recursive: true });
+      await writeFile(
+        join(cwd, ".pi", "on-demand-context.json"),
+        JSON.stringify({ hideContents: true }),
+      );
+
+      expect(loadConfig(cwd, true)).toEqual({ workingDirOnly: true, hideContents: true });
+      // Untrusted project: the project file must not steer the extension.
+      expect(loadConfig(cwd, false)).toEqual({ workingDirOnly: true, hideContents: false });
+      // Project overrides global per key.
+      await writeFile(join(cwd, ".pi", "on-demand-context.json"), JSON.stringify({ workingDirOnly: false }));
+      expect(loadConfig(cwd, true)).toEqual({ workingDirOnly: false, hideContents: false });
+    } finally {
+      delete process.env.PI_TEST_AGENT_DIR;
+      await rm(agent, { recursive: true, force: true });
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("missing or corrupt files fall back to defaults (no throw)", async () => {
+    const agent = await mkdtemp(join(tmpdir(), "pdoc-agent-"));
+    const cwd = await mkdtemp(join(tmpdir(), "pdoc-cwd-"));
+    process.env.PI_TEST_AGENT_DIR = agent;
+    try {
+      expect(loadConfig(cwd, true)).toEqual({ workingDirOnly: false, hideContents: false });
+      await writeFile(join(agent, "on-demand-context.json"), "{ not json");
+      expect(loadConfig(cwd, false)).toEqual({ workingDirOnly: false, hideContents: false });
+      // A JSON array / scalar is not a config object.
+      await writeFile(join(agent, "on-demand-context.json"), "[1,2]");
+      expect(loadConfig(cwd, false)).toEqual({ workingDirOnly: false, hideContents: false });
+    } finally {
+      delete process.env.PI_TEST_AGENT_DIR;
+      await rm(agent, { recursive: true, force: true });
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 });
 

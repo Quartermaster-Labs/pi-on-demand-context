@@ -36,6 +36,10 @@ Everything lives in `index.ts`. The extension is the default-exported
     `currentDir` — bash subshells own that. Relative paths resolve against
     `launchDir` because pi's file tools run from pi's process cwd, not the
     bash-tracked dir.
+  Before discovery, the `workingDirOnly` config gate (#1): a target dir
+  outside the `launchDir` subtree is skipped (`isUnderOrEqual`) — that's where
+  `~/CLAUDE.md` / homebrew leak in from stray touches. Bash `cd` already moved
+  `currentDir` before the gate, so tracked cwd still follows the model.
   Injection happens right here, **synchronously inside the hook**: `pickNewFiles`
   selects the not-yet-seen files, `buildContextBlock` renders them, and
   `pi.sendMessage` injects them **once, durably** with `deliverAs: "steer"`.
@@ -54,13 +58,24 @@ Everything lives in `index.ts`. The extension is the default-exported
   context: once, durably, at touch time.
   The message's `details` carries `{ files: [paths] }` and a
   `registerMessageRenderer("on-demand-context")` shows the TUI only a compact
-  `loaded <paths>` line (full text when tool output is expanded) — without it,
-  pi's default renderer dumps the whole markdown block into the transcript.
+  `loaded <paths>` line (full text when tool output is expanded, unless
+  `hideContents` is set — then expansion is a no-op) — without it, pi's
+  default renderer dumps the whole markdown block into the transcript.
 - **`before_agent_start`** — seed-only: records pi's own startup context files
   (`systemPromptOptions.contextFiles`) into `piLoadedPaths` so we never
   double-inject what pi already put in the system prompt. Returns nothing.
-- **`session_start`** — resets `state` (handles `/new`, `/resume`, `/fork`).
-- **`/list-context`** command — user-facing dump of loaded files; no token cost.
+- **`session_start`** — resets `state` (handles `/new`, `/resume`, `/fork`)
+  and re-reads config (also fires on `/reload`).
+- **Config** — `loadConfig(cwd, projectTrusted)` merges
+  `<agentDir>/on-demand-context.json` (global, `getAgentDir()`) with
+  `<cwd>/.pi/on-demand-context.json` (project, `CONFIG_DIR_NAME`) — project
+  wins per key. Options: `workingDirOnly`, `hideContents` (see README).
+  The project file is read only when `ctx.isProjectTrusted()` — an untrusted
+  project must not steer a globally installed extension. At extension load
+  time there is no ctx (no trust decision), so only the global file applies
+  until the first `session_start`.
+- **`/list-context`** command — user-facing dump of loaded files + active
+  config; no token cost.
 
 ### Key data flow
 
@@ -83,8 +98,12 @@ the transient hook cannot.
 
 ### Things to know before editing
 
-- Two exported, unit-tested pure helpers: `dirForToolEvent(toolName, input,
-  baseDir)` (which dir a file/dir tool touches) and `resolveCdDir(...)` below.
+- Exported, unit-tested helpers: `dirForToolEvent(toolName, input, baseDir)`
+  (which dir a file/dir tool touches), `resolveCdDir(...)` below,
+  `isUnderOrEqual(child, parent)` (subtree test behind `workingDirOnly` —
+  normalizes bash→win + separators, case-insensitive only on win32),
+  `mergeConfig(global, project)` (pure config merge; non-boolean truthies
+  don't enable options), and `loadConfig(cwd, trusted)` (fs-backed).
 - `resolveCdDir(command, output, currentDir, home)` parses a `cd` command:
   bare `cd` → home,
   `&& pwd` / `; pwd` → trust the pwd output (handles spaces, `cd -`, `~`, `$VAR`),
@@ -95,7 +114,10 @@ the transient hook cannot.
   host's own copy for every extension, in all runtime modes (Node dist, bun
   binary, TS source — see `loader.js` `getAliases`/`VIRTUAL_MODULES`). Don't
   add it to package.json. Vitest has no such loader: `vitest.config.ts`
-  aliases it to `test/pi-tui-stub.ts` so `index.ts` resolves under test.
+  aliases `pi-tui` to `test/pi-tui-stub.ts` and `pi-coding-agent` to
+  `test/pi-coding-agent-stub.ts` (type imports are erased; the stub provides
+  the runtime `CONFIG_DIR_NAME`/`getAgentDir`, and `getAgentDir()` honors
+  `PI_TEST_AGENT_DIR` so `loadConfig` tests stay hermetic).
 - **Windows/msys path handling**: `fromBashPath` converts `/c/Users/...` →
   `C:\Users\...`; `pathKey` normalizes for dedup comparison. Touch carefully —
   this repo runs on win32 where bash and node disagree on path format.

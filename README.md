@@ -35,7 +35,8 @@ response.
   block. Being durable session history, it is never re-sent: no per-call token
   tax, and revisiting a dir costs nothing.
 - **TUI** — the injection renders as a single compact line,
-  `loaded <path>, <path>`; expanding tool output shows the full text.
+  `loaded <path>, <path>`; expanding tool output shows the full text
+  (disable with `hideContents` — see Configuration).
 - **Dedup** — files pi already loaded at startup
   (`systemPromptOptions.contextFiles`) and files injected via a shared parent
   are never re-sent. The extension complements pi's loader instead of
@@ -81,12 +82,45 @@ before the model's next turn.
 
 ### For the user
 
-- `/list-context` — show every context file loaded so far (no token cost).
+- `/list-context` — show every context file loaded so far, plus the active
+  config (no token cost).
 - Context state resets on `/new`, `/resume`, `/fork`.
+
+## Configuration
+
+Optional JSON config. Project-local values override global, per key. The
+project file is honored only for **trusted** projects (an untrusted project
+must not steer a globally installed extension).
+
+| File | Scope |
+|---|---|
+| `~/.pi/agent/on-demand-context.json` | global (all projects) |
+| `<project>/.pi/on-demand-context.json` | per-project |
+
+```json
+{
+  "workingDirOnly": true,
+  "hideContents": true
+}
+```
+
+- `workingDirOnly` (default `false`) — only load context files under pi's
+  working (launch) directory. When `true`, `cd`-ing or touching files outside
+  the project loads nothing (the tracked working dir still moves), so
+  unrelated `CLAUDE.md` files — e.g. `~/CLAUDE.md` or a package manager's —
+  never leak in. ([#1](https://github.com/Quartermaster-Labs/pi-on-demand-context/issues/1))
+- `hideContents` (default `false`) — the TUI never shows the injected file
+  contents, even when tool output is expanded; the `loaded <paths>` line stays
+  compact. The LLM still receives the full contents.
+
+Config is re-read at every session start, including `/reload`.
 
 ## Behavior notes
 
 - A dir's context includes **that dir and all parents** up to pi's launch dir.
+- Touching a dir **outside** the launch dir walks up to the filesystem root
+  by default (so `~/CLAUDE.md` etc. can load); `workingDirOnly: true` turns
+  that off.
 - `cd`-ing back into a visited dir loads nothing (dedup).
 - Visiting multiple dirs accumulates context; each new dir contributes only
   its not-yet-seen files.
