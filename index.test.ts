@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { resolve, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
 import {
   resolveCdDir,
   dirForToolEvent,
@@ -10,6 +10,7 @@ import {
   isUnderOrEqual,
   mergeConfig,
   loadConfig,
+  fileDedupKey,
 } from "./index.ts";
 
 const HOME = "/home/radu";
@@ -266,5 +267,37 @@ describe("pickNewFiles", () => {
     const s = { piLoadedPaths: new Set<string>(), injected: new Set<string>() };
     const out = pickNewFiles(s, [f("/proj/a/b/CLAUDE.md"), f("/proj/CLAUDE.md")]);
     expect(out.map((x) => x.path)).toEqual(["/proj/a/b/CLAUDE.md", "/proj/CLAUDE.md"]);
+  });
+});
+
+describe("fileDedupKey", () => {
+  it("falls back to the normalized path when the file doesn't exist", () => {
+    // "/proj/..." (multi-char first segment) is a no-op for fromBashPath on
+    // both win32 and posix, so the normalized key is identical everywhere.
+    expect(fileDedupKey("/proj/definitely-missing/CLAUDE.md")).toBe(
+      "/proj/definitely-missing/claude.md",
+    );
+  });
+
+  it("resolves to the realpath, so aliases of the same file dedup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pdoc-sym-"));
+    const real = join(root, "real");
+    const link = join(root, "link");
+    try {
+      await mkdir(real, { recursive: true });
+      await writeFile(join(real, "CLAUDE.md"), "x\n");
+      // junction on win32 (no admin needed); dir symlink on posix
+      await symlink(real, link, process.platform === "win32" ? "junction" : "dir");
+      const s = { piLoadedPaths: new Set<string>(), injected: new Set<string>() };
+      const out = pickNewFiles(s, [
+        { path: join(real, "CLAUDE.md"), content: "x\n" },
+        { path: join(link, "CLAUDE.md"), content: "x\n" },
+      ]);
+      // The alias is the same physical file → only one survives
+      expect(out).toHaveLength(1);
+      expect(out[0].path).toBe(join(real, "CLAUDE.md"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

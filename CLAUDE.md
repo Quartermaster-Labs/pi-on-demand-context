@@ -82,14 +82,18 @@ Everything lives in `index.ts`. The extension is the default-exported
 
 ### Key data flow
 
-`state` (module-level singleton) holds `currentDir`, `dirContexts` (dir → files
-found), plus the dedup machinery:
+`state` (module-level singleton) holds `currentDir`, `dirContexts` (keyed by
+`pathKey(dir)` → `{ dir (display spelling), files }`), plus the dedup machinery:
 
-- `inFlight` — dirs whose async discovery is running, so a second touch of the
-  same dir before discovery resolves doesn't kick off a duplicate scan.
-- `injected` — normalized paths already sent durably. `pickNewFiles` skips these
+- `inFlight` — pathKey'd dirs whose async discovery is running, so a second touch
+  of the same dir (any casing on win32) before discovery resolves doesn't kick
+  off a duplicate scan.
+- `injected` — `fileDedupKey`'d paths already sent durably (realpath-canonical,
+  so symlink/junction aliases of the same file dedup). `pickNewFiles` skips these
   (and `piLoadedPaths`) so a parent `CLAUDE.md` shared by two visited dirs is
-  injected only once.
+  injected only once. `pickNewFiles` marks files before the awaited send — the
+  tool_result hook rolls the marks back (and skips caching the dir) if the send
+  throws, so the next touch retries.
 - `piLoadedPaths` — paths pi's startup loader already injected, seeded in
   `before_agent_start`. Why no `--no-context-files` flag is needed: the extension
   complements pi's loader instead of replacing it.
@@ -101,7 +105,9 @@ the transient hook cannot.
 
 ### Things to know before editing
 
-- Exported, unit-tested helpers: `dirForToolEvent(toolName, input, baseDir)`
+- Exported, unit-tested helpers: `fileDedupKey(p)` (canonical dedup key —
+  `pathKey(realpath(p))`, fallback to `pathKey(p)` when unresolvable; symlink/
+  junction aliases of the same file dedup), `dirForToolEvent(toolName, input, baseDir)`
   (which dir a file/dir tool touches), `resolveCdDir(...)` below,
   `isUnderOrEqual(child, parent)` (subtree test behind `workingDirOnly` —
   normalizes bash→win + separators, case-insensitive only on win32),

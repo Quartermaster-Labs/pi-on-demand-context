@@ -28,7 +28,7 @@ import type { ExtensionAPI, BuildSystemPromptOptions } from "@earendil-works/pi-
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { readFile } from "node:fs/promises";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { join, dirname, isAbsolute, resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -60,6 +60,8 @@ interface ContextFile {
 }
 
 interface DirState {
+  /** As-discovered spelling, for display (the map key is pathKey(dir)). */
+  dir: string;
   files: ContextFile[];
 }
 
@@ -70,10 +72,10 @@ interface ContextDetails {
 
 interface State {
   currentDir: string;
-  dirContexts: Map<string, DirState>;
+  dirContexts: Map<string, DirState>; // keyed by pathKey(dir); display spelling in DirState.dir
   piLoadedPaths: Set<string>; // files pi's own startup loader already injected — never re-send
-  injected: Set<string>; // file paths we've already injected durably — dedups shared parents
-  inFlight: Set<string>; // dirs whose discovery is running — dedup before dirContexts is set
+  injected: Set<string>; // fileDedupKey'd paths already injected durably — dedups shared parents + aliases
+  inFlight: Set<string>; // pathKey'd dirs whose discovery is running — dedup before dirContexts is set
   launchDir: string; // dir pi was started in — walk-up ceiling
 }
 
@@ -101,6 +103,19 @@ function fromBashPath(p: string): string {
 // Lets us match pi's already-loaded files against ours regardless of format.
 function pathKey(p: string): string {
   return fromBashPath(p).replace(/\\/g, "/").toLowerCase();
+}
+
+// Canonical dedup key for a context file: its realpath, so symlink/junction
+// aliases of the same physical file dedup against each other (and against pi's
+// loader, which may see the file through a different spelling). Falls back to
+// the plain pathKey when realpath can't resolve it. Display always uses the
+// as-found path — this only affects dedup comparison. Exported for tests.
+export function fileDedupKey(p: string): string {
+  try {
+    return pathKey(realpathSync(p));
+  } catch {
+    return pathKey(p);
+  }
 }
 
 // `ceiling` = pi's launch dir. Walk-up stops there so we never scan above the
@@ -294,14 +309,15 @@ function initState(): State {
 
 // From a dir's discovered files, return the ones not yet in the prompt — skips
 // files pi loaded at startup and files a shared parent already injected. Marks
-// the returned files as injected. `files` arrives deepest-first.
+// the returned files as injected (the caller must roll the marks back — delete
+// from `injected` — if the subsequent send fails). `files` arrives deepest-first.
 export function pickNewFiles(
   s: Pick<State, "piLoadedPaths" | "injected">,
   files: ContextFile[],
 ): ContextFile[] {
   const out: ContextFile[] = [];
   for (const f of files) {
-    const key = pathKey(f.path);
+    const key = fileDedupKey(f.path);
     if (s.piLoadedPaths.has(key) || s.injected.has(key)) continue;
     s.injected.add(key);
     out.push(f);
@@ -411,8 +427,11 @@ export default function onDemandContext(pi: ExtensionAPI) {
     // working directory".
     if (config.workingDirOnly && !isUnderOrEqual(dir, state.launchDir)) return;
 
-    // Already loaded, or a discovery is already running for this dir
-    if (state.dirContexts.has(dir) || state.inFlight.has(dir)) return;
+    // Already loaded, or a discovery is already running for this dir. Keys are
+    // pathKey-normalized (case-insensitive on win32) so a differently-cased
+    // spelling of the same dir doesn't trigger a redundant re-scan.
+    const dirKey = pathKey(dir);
+    if (state.dirContexts.has(dirKey) || state.inFlight.has(dirKey)) return;
 
     // Discover and inject SYNCHRONOUSLY (this hook is awaited by pi's
     // afterToolCall). Why: pi's agent loop only drains the steering queue at
@@ -422,24 +441,38 @@ export default function onDemandContext(pi: ExtensionAPI) {
     // model already thought/replied to the tool result). Awaiting here makes
     // the "loaded <paths>" line appear right after the tool result — before
     // the model's next thinking block. Cost: a few ms of local file reads.
-    state.inFlight.add(dir);
+    state.inFlight.add(dirKey);
+    let fresh: ContextFile[] = [];
     try {
       const files = await discoverContextFiles(dir, state.launchDir);
       if (!state) return;
-      state.dirContexts.set(dir, { files });
-      const fresh = pickNewFiles(state, files);
-      if (fresh.length === 0) return;
-      await pi.sendMessage(
-        {
-          customType: "on-demand-context",
-          content: [{ type: "text", text: buildContextBlock(fresh) }],
-          display: true,
-          details: { files: fresh.map((f) => f.path) },
-        },
-        { deliverAs: "steer" },
-      );
+      fresh = pickNewFiles(state, files);
+      if (fresh.length === 0) {
+        // Discovered but nothing new to send (shared parent already injected,
+        // or the dir has no context files) — cache so the dir isn't re-scanned.
+        state.dirContexts.set(dirKey, { dir, files });
+        return;
+      }
+      try {
+        await pi.sendMessage(
+          {
+            customType: "on-demand-context",
+            content: [{ type: "text", text: buildContextBlock(fresh) }],
+            display: true,
+            details: { files: fresh.map((f) => f.path) },
+          },
+          { deliverAs: "steer" },
+        );
+      } catch (err) {
+        // Send failed: roll back the injected marks and skip caching the dir so
+        // the next touch re-discovers and retries (a few ms of local reads).
+        for (const f of fresh) state.injected.delete(fileDedupKey(f.path));
+        console.error(`on-demand-context: failed to inject context for ${dir}: ${err}`);
+        return;
+      }
+      state.dirContexts.set(dirKey, { dir, files });
     } finally {
-      state?.inFlight.delete(dir);
+      state?.inFlight.delete(dirKey);
     }
   });
 
@@ -452,7 +485,7 @@ export default function onDemandContext(pi: ExtensionAPI) {
     if (!state) return;
     for (const cf of event.systemPromptOptions?.contextFiles ?? []) {
       const p = typeof cf === "string" ? cf : cf?.path;
-      if (p) state.piLoadedPaths.add(pathKey(p));
+      if (p) state.piLoadedPaths.add(fileDedupKey(p));
     }
   });
 
@@ -472,8 +505,8 @@ export default function onDemandContext(pi: ExtensionAPI) {
       }
 
       const lines: string[] = [`(config: ${cfg})`];
-      for (const [dir, dirState] of state.dirContexts) {
-        lines.push(`\n${dir}:`);
+      for (const dirState of state.dirContexts.values()) {
+        lines.push(`\n${dirState.dir}:`);
         if (dirState.files.length === 0) {
           lines.push("  (no context files)");
         } else {
