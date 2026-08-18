@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.1] — 2026-08-18
+
+### Fixed
+
+- **Dedup keys normalized** — the per-dir cache (`dirContexts`) and the
+  in-flight set are keyed by the normalized `pathKey(dir)` (case-insensitive
+  on Windows), so a differently-cased spelling of an already-scanned dir no
+  longer triggers a redundant re-scan or a second `/list-context` entry.
+  `/list-context` still shows the original path spelling.
+- **Symlink/junction aliases dedup** — context files are keyed by their
+  canonical realpath, so the same physical file reached through a symlink,
+  junction, or a different spelling (including one seen by pi's own startup
+  loader) is injected only once.
+- **Injection failure retries** — if the context message fails to send, the
+  "injected" marks are rolled back and the dir is not cached, so the next
+  touch of that dir re-discovers and retries instead of the context being
+  silently lost for the session.
+
 ## [0.3.0] — 2026-08-17
 
 ### Added
